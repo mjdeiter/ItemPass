@@ -13,11 +13,11 @@
 --   - Hidden items are filtered from Inventory dropdown & inventory-based autocomplete
 --   - Hidden items are NOT removed from Saved Items
 
--- ItemPass v1.1.2
--- Minor Update:
---   + Added advanced autocomplete (prefix > substring > fuzzy ranking)
---   + Limited autocomplete to top 10 suggestions
---   + Improved UI selection behavior (no spam)
+-- ItemPass v1.3.0
+-- Major Update:
+--   + Added adaptive latency tracking (auto-learns transfer times)
+--   + Manual transfer time override in GUI
+--   + Configurable timeout behavior for group/server variations
 
 local mq    = require('mq')
 local ImGui = require('ImGui')
@@ -25,14 +25,14 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.1.2" -- semantic version: MAJOR.MINOR.PATCH
+local SCRIPT_VERSION = "1.3.0" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
 ---------------------------------------------------------------------
 
 local AUTO_REPEAT_CHAIN = false
-local REMOTE_USE_DELAY  = 3
+local BASE_REMOTE_USE_DELAY  = 3
 
 ---------------------------------------------------------------------
 -- PATHS / CONSTANTS
@@ -44,7 +44,7 @@ local HIDDEN_FILE_PATH  = MQROOT .. '/itempass_hidden.txt'
 
 local SLOT_MIN = 0
 local SLOT_MAX = 30
-local TRADE_TIMEOUT      = 20
+local BASE_TRADE_TIMEOUT      = 20
 local TRADE_MAX_ATTEMPTS = 3
 local MAX_LOG            = 200
 
@@ -93,6 +93,16 @@ local hiddenLookup           = {}
 local lastAutocompleteChoice = nil
 
 ---------------------------------------------------------------------
+-- LATENCY TRACKING STATE
+---------------------------------------------------------------------
+local latencyStats = {
+    totalTransfers = 0,
+    avgTransferTime = 0,
+    measurements = {},
+    manualOverride = 0,  -- 0 = use adaptive, >0 = manual seconds
+}
+
+---------------------------------------------------------------------
 -- UTILITIES
 ---------------------------------------------------------------------
 local function trim(s)
@@ -118,6 +128,62 @@ local function fileExists(path)
     local f = io.open(path, 'r')
     if f then f:close() return true end
     return false
+end
+
+---------------------------------------------------------------------
+-- LATENCY TRACKING
+---------------------------------------------------------------------
+local function recordTransferTime(duration)
+    if latencyStats.manualOverride > 0 then
+        return  -- don't record if using manual override
+    end
+    
+    duration = math.max(duration, 0.1)  -- minimum 0.1s
+    table.insert(latencyStats.measurements, duration)
+    
+    -- Keep last 30 measurements for rolling average
+    if #latencyStats.measurements > 30 then
+        table.remove(latencyStats.measurements, 1)
+    end
+    
+    local sum = 0
+    for _, v in ipairs(latencyStats.measurements) do
+        sum = sum + v
+    end
+    latencyStats.avgTransferTime = sum / #latencyStats.measurements
+    latencyStats.totalTransfers = latencyStats.totalTransfers + 1
+    
+    addStatus('Transfer completed in %.1fs (avg: %.1fs over %d samples)',
+        duration, latencyStats.avgTransferTime, #latencyStats.measurements)
+end
+
+local function getAdaptiveTradeTimeout()
+    if latencyStats.manualOverride > 0 then
+        return latencyStats.manualOverride
+    end
+    
+    -- Adaptive timeout: base + (average transfer time * safety multiplier)
+    local adaptiveTimeout = BASE_TRADE_TIMEOUT
+    if latencyStats.avgTransferTime > 0 then
+        -- Add 3x the average transfer time as buffer for network variance
+        adaptiveTimeout = BASE_TRADE_TIMEOUT + (latencyStats.avgTransferTime * 3)
+    end
+    
+    return adaptiveTimeout
+end
+
+local function getAdaptiveRemoteUseDelay()
+    if latencyStats.manualOverride > 0 then
+        return latencyStats.manualOverride
+    end
+    
+    -- Use average transfer time + base delay as minimum wait before requesting use
+    local adaptiveDelay = BASE_REMOTE_USE_DELAY
+    if latencyStats.avgTransferTime > 0 then
+        adaptiveDelay = BASE_REMOTE_USE_DELAY + (latencyStats.avgTransferTime * 1.5)
+    end
+    
+    return adaptiveDelay
 end
 
 ---------------------------------------------------------------------
@@ -862,8 +928,10 @@ local function scmTick()
     end
 
 if scm.phase=='GIVE_TO_MEMBER' then
-        if now - scm.startTime >= TRADE_TIMEOUT then
-            addStatus('Assuming %s received "%s". Requesting remote use.', scm.member, item)
+        local adaptiveTimeout = getAdaptiveTradeTimeout()
+        if now - scm.startTime >= adaptiveTimeout then
+            addStatus('Assuming %s received "%s" (timeout: %.1fs). Requesting remote use.', 
+                scm.member, item, adaptiveTimeout)
             scm.phase='MEMBER_USE'
             scm.startTime=now
             requestRemoteUse(scm.member, item)
@@ -872,7 +940,8 @@ if scm.phase=='GIVE_TO_MEMBER' then
     end
 
     if scm.phase=='MEMBER_USE' then
-        if now - scm.startTime >= REMOTE_USE_DELAY then
+        local adaptiveDelay = getAdaptiveRemoteUseDelay()
+        if now - scm.startTime >= adaptiveDelay then
             addStatus('Requesting return of "%s" from %s.', item, scm.member)
             scm.phase='RETURN_TO_ME'
             scm.startTime=now
@@ -883,6 +952,9 @@ if scm.phase=='GIVE_TO_MEMBER' then
 
     if scm.phase=='RETURN_TO_ME' then
         if countItemByName(item)>0 then
+            local transferDuration = now - scm.startTime
+            recordTransferTime(transferDuration)
+            
             addStatus('Item "%s" returned from %s.', item, scm.member)
 
             if scm.index < #scm.list then
@@ -910,7 +982,8 @@ if scm.phase=='GIVE_TO_MEMBER' then
             return
         end
 
-        if now - scm.startTime >= TRADE_TIMEOUT then
+        local adaptiveTimeout = getAdaptiveTradeTimeout()
+        if now - scm.startTime >= adaptiveTimeout then
             scm.attempts = scm.attempts + 1
             if scm.attempts < TRADE_MAX_ATTEMPTS then
                 addStatus('Still waiting for "%s" from %s; retry (%d/%d).',
@@ -1169,6 +1242,41 @@ local function renderUI()
         if ImGui.Button('Reset##reset') then resetChain() end
 
         ImGui.Text('Status: %s', running and (paused and 'Paused' or 'Running') or 'Stopped')
+        ImGui.Separator()
+
+        ----------------------------------------------------
+        -- LATENCY SETTINGS
+        ----------------------------------------------------
+        ImGui.Text('Latency Settings')
+        ImGui.TextWrapped('Tip: Script automatically learns optimal transfer times. Use manual override for custom tuning.')
+        
+        local prevOverride = latencyStats.manualOverride
+        local overrideStr = string.format('%.1f', prevOverride)
+        overrideStr = ImGui.InputText('Manual Transfer Time (seconds)##latency_override', overrideStr, 16)
+        local newOverride = tonumber(overrideStr) or 0
+        if newOverride < 0 then newOverride = 0 end
+        
+        if newOverride ~= prevOverride then
+            latencyStats.manualOverride = newOverride
+            if newOverride > 0 then
+                addStatus('Transfer time override set to %.1f seconds.', newOverride)
+            else
+                addStatus('Using adaptive latency tracking.')
+            end
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button('Reset to Auto##reset_latency') then
+            latencyStats.manualOverride = 0
+            latencyStats.measurements = {}
+            latencyStats.avgTransferTime = 0
+            addStatus('Latency tracking reset. Now learning...')
+        end
+
+        local modeStr = latencyStats.manualOverride > 0 
+            and string.format('Manual: %.1fs', latencyStats.manualOverride)
+            or string.format('Adaptive: %.1fs (n=%d)', latencyStats.avgTransferTime, #latencyStats.measurements)
+        ImGui.TextDisabled('Mode: %s', modeStr)
         ImGui.Separator()
 
         ----------------------------------------------------
