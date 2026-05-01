@@ -6,6 +6,27 @@ The format follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] – 2026-05-01
+
+### Added
+- Adaptive latency tracking that learns actual transfer times and adjusts timeouts automatically.
+- Manual Transfer Timeout override in the GUI (enter seconds to force a fixed timeout).
+- GUI Transfer Timing panel showing measured transfers and rolling average transfer time.
+
+### Changed
+- Trade and remote-use timeouts now use adaptive calculations when enough samples are collected:
+  - Trade timeout: `BASE_TRADE_TIMEOUT + (avgTransferTime * 3)` (safety buffer)
+  - Remote use delay: `BASE_REMOTE_USE_DELAY + (avgTransferTime * 1.5)`
+- Default behavior remains the same until the script has collected transfer samples.
+
+### Fixed
+- Do not record latency samples while a manual override is set.
+
+### Internal
+- Added rolling-sample history and status logging for transfer timing diagnostics.
+
+---
+
 ## [1.2.4] – 2026-01-19
 
 ### Fixed
@@ -58,7 +79,7 @@ The format follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **One-Way Trade** option  
-  - Passes items through the chain (with `/useitem`)
+  - Passes items through the chain (with `/useitem`)  
   - Does **not** return from the final (or specified) target
 - **One-Way Target** dropdown  
   - Supports `<Any Member>` and live group member list
