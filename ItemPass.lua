@@ -437,6 +437,7 @@ local function scanInventory()
 
             if nm ~= '' and not isItemHidden(nm) then
                 if cslots > 0 then
+                    -- FIXED: Use each bag's own cslots, not a previous bag's
                     for i = 1, cslots do
                         local inner = it.Item(i)
                         if inner() and inner.ID() ~= 0 then
@@ -999,363 +1000,240 @@ if scm.phase=='GIVE_TO_MEMBER' then
     end
 end
 
-local function chainTick()
-    scmTick()
-end
-
 ---------------------------------------------------------------------
--- BINDS
+-- GUI
 ---------------------------------------------------------------------
-mq.bind('/itempassui',    function() showUI = not showUI end)
-mq.bind('/itempassstart', startChain)
-mq.bind('/itempasspause', togglePause)
-mq.bind('/itempassreset', resetChain)
-
----------------------------------------------------------------------
--- GUI (Advanced Autocomplete + Spam Fix)
----------------------------------------------------------------------
-local function renderUI()
+local function renderGUI()
     if not showUI then return end
 
-    local ok, err = pcall(function()
+    ImGui.SetNextWindowSize(1000, 700, ImGui.Cond_FirstUseEver)
+    if ImGui.Begin('ItemPass v' .. SCRIPT_VERSION, showUI) then
 
-        -- Window title now shows script name + version
-        local open = ImGui.Begin(string.format('ItemPass v%s', SCRIPT_VERSION), true)
-        if not open then
-            showUI=false
-            ImGui.End()
-            return
+        -- Status Log
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+        ImGui.Text('Status Log')
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+        ImGui.BeginChild('StatusLog', 0, 150, true)
+        for _, line in ipairs(statusLog) do
+            ImGui.TextUnformatted(line)
         end
+        if ImGui.GetScrollY() >= ImGui.GetScrollMaxY() - 1 then
+            ImGui.SetScrollHereY(1.0)
+        end
+        ImGui.EndChild()
 
-        ----------------------------------------------------
-        -- ITEM CONFIG
-        ----------------------------------------------------
-        ImGui.Text('Item Configuration')
+        ImGui.Spacing()
 
-        manualItemName = ImGui.InputText('Item Name##item_input', manualItemName or '', 64)
+        -- Item Selection
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+        ImGui.Text('Item Selection')
+        ImGui.Text('═══════════════════════════════════════════════════════════')
 
-        -- Build suggestions (ranked, max N, hidden-filtered)
-        local suggestions = getItemSuggestions(manualItemName)
+        ImGui.Text('Active Item: ' .. (trim(activeItemName) == '' and '(none)' or activeItemName))
+        ImGui.Spacing()
+
+        ImGui.PushItemWidth(300)
+        manualItemName = ImGui.InputText('Item Name', manualItemName, 256)
+        ImGui.PopItemWidth()
 
         ImGui.SameLine()
-        if ImGui.Button('Set Active##btn_setactive') then
-            local nm = trim(manualItemName)
-            if nm ~= '' then
-                activeItemName = nm
-                addStatus('Active item set to "%s".', nm)
-            else
-                addStatus('No item name entered.')
-            end
-        end
-
-        if manualItemName and trim(manualItemName)~='' then
-            ImGui.SameLine()
-            if #suggestions>0 then
-                ImGui.TextDisabled(string.format('(%d match%s)', #suggestions, (#suggestions~=1 and 'es' or '')))
-            else
-                ImGui.TextDisabled('(no matches)')
-            end
-        end
-
-        ----------------------------------------------------
-        -- ADVANCED AUTOCOMPLETE DROPDOWN
-        ----------------------------------------------------
-        local chosen = nil
-        if #suggestions > 0 then
-            if ImGui.BeginCombo('Autocomplete##item_autocomplete', 'Select match...') then
-                for _, entry in ipairs(suggestions) do
-                    local label    = entry.display
-                    local sel      = (entry.name == manualItemName)
-
-                    if ImGui.Selectable(label, sel) then
-                        chosen = entry.name
-                    end
-
-                    if sel then
-                        ImGui.SetItemDefaultFocus()
-                    end
-                end
-                ImGui.EndCombo()
-            end
-        end
-
-        -- Apply autocomplete choice ONCE per user action
-        if chosen and chosen ~= lastAutocompleteChoice then
-            manualItemName = chosen
-            activeItemName = chosen
-            addStatus('Autocomplete selected "%s".', chosen)
-            lastAutocompleteChoice = chosen
-        elseif not chosen then
-            -- reset when dropdown is closed
-            lastAutocompleteChoice = nil
-        end
-
-        ----------------------------------------------------
-        -- SAVE ITEM NAME
-        ----------------------------------------------------
-        local canSaveItem = trim(manualItemName) ~= ''
-        if not canSaveItem then ImGui.BeginDisabled(true) end
-        if ImGui.Button('Save Item Name##btn_saveitem') then
+        if ImGui.Button('Save Item', 80, 0) then
             saveCurrentItem()
         end
-        if not canSaveItem then ImGui.EndDisabled() end
 
-        ----------------------------------------------------
-        -- SCAN INVENTORY
-        ----------------------------------------------------
+        ImGui.Spacing()
+
+        -- Saved Items List
+        ImGui.Text('Saved Items')
+        if ImGui.BeginListBox('##SavedItemsList', 300, 150) then
+            for idx, nm in ipairs(savedItems) do
+                local selected = (selectedSavedItem == idx)
+                if ImGui.Selectable(nm, selected) then
+                    selectedSavedItem = idx
+                    activeItemName = nm
+                end
+            end
+            ImGui.EndListBox()
+        end
+
         ImGui.SameLine()
-        if ImGui.Button('Scan Inventory##btn_scaninv') then
+        ImGui.BeginGroup()
+        if ImGui.Button('Delete', 80, 0) then
+            deleteSelectedSavedItem()
+            activeItemName = (selectedSavedItem > 0 and selectedSavedItem <= #savedItems) and savedItems[selectedSavedItem] or ''
+        end
+        ImGui.EndGroup()
+
+        ImGui.Spacing()
+
+        -- Inventory Items
+        ImGui.Text('Your Inventory')
+        if ImGui.Button('Scan Inventory') then
             scanInventory()
         end
 
-        ----------------------------------------------------
-        -- HIDE/UNHIDE
-        ----------------------------------------------------
         ImGui.SameLine()
-        local canHide = trim(manualItemName) ~= ''
-        if not canHide then ImGui.BeginDisabled(true) end
-        local hidden = isItemHidden(manualItemName)
-        local hideText = hidden and 'Unhide Item##unhide' or 'Hide Item##hide'
-        if ImGui.Button(hideText) then
-            if hidden then
-                unhideItemByName(manualItemName)
-            else
-                hideItemByName(manualItemName)
-            end
-            scanInventory()
-        end
-        if not canHide then ImGui.EndDisabled() end
+        ImGui.Text(string.format('Inventory has %d unique items', #inventoryItems))
 
-        ----------------------------------------------------
-        -- SAVED ITEMS
-        ----------------------------------------------------
-        if #savedItems > 0 then
-            local preview = savedItems[selectedSavedItem] or 'Select...'
-            if ImGui.BeginCombo('Saved Items##combo_saved', preview) then
-                for i,nm in ipairs(savedItems) do
-                    local sel = (i == selectedSavedItem)
-                    if ImGui.Selectable(nm, sel) then
-                        selectedSavedItem = i
-                        manualItemName    = nm
-                        activeItemName    = nm
-                    end
-                    if sel then ImGui.SetItemDefaultFocus() end
+        if ImGui.BeginListBox('##InventoryList', 300, 150) then
+            for idx, item in ipairs(inventoryItems) do
+                local selected = (selectedInventoryIndex == idx)
+                if ImGui.Selectable(item.display, selected) then
+                    selectedInventoryIndex = idx
+                    activeItemName = item.name
                 end
-                ImGui.EndCombo()
             end
-
-            if ImGui.Button('Delete Selected##del_saved') then
-                deleteSelectedSavedItem()
-            end
-
-        else
-            ImGui.TextDisabled('No saved items.')
+            ImGui.EndListBox()
         end
 
-        ----------------------------------------------------
-        -- INVENTORY COMBO
-        ----------------------------------------------------
-        if #inventoryItems > 0 then
-            local preview = 'Select...'
-            if selectedInventoryIndex>0 and inventoryItems[selectedInventoryIndex] then
-                preview = inventoryItems[selectedInventoryIndex].display
-            end
+        ImGui.Spacing()
 
-            if ImGui.BeginCombo('Inventory Items##combo_inv', preview) then
-                for i,it in ipairs(inventoryItems) do
-                    local sel = (i == selectedInventoryIndex)
-                    if ImGui.Selectable(it.display, sel) then
-                        selectedInventoryIndex = i
-                        manualItemName         = it.name
-                        activeItemName         = it.name
-                    end
-                    if sel then ImGui.SetItemDefaultFocus() end
-                end
-                ImGui.EndCombo()
-            end
-        else
-            ImGui.TextDisabled('Inventory not scanned yet.')
-        end
-
-        ImGui.Text('Active Item: %s', activeItemName~='' and activeItemName or '<none>')
-        ImGui.Separator()
-
-        ----------------------------------------------------
-        -- CHAIN MEMBERS
-        ----------------------------------------------------
+        -- Chain Members
+        ImGui.Text('═══════════════════════════════════════════════════════════')
         ImGui.Text('Chain Members')
-        if ImGui.Button('Refresh Group##ref_group') then refreshChainMembers() end
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+
+        if ImGui.Button('Refresh Group') then
+            refreshChainMembers()
+        end
+
         ImGui.SameLine()
-        if ImGui.Button('Purge Missing##purge_miss') then purgeMissingMembers() end
+        if ImGui.Button('Purge Missing') then
+            purgeMissingMembers()
+        end
 
-        for _,m in ipairs(chainMembers) do
-            local controller = trim(mq.TLO.Me.Name() or '')
-            local mark       = m.enabled and '[X]' or '[ ]'
-            local selfTag    = (m.name==controller) and ' [You]' or ''
-            local missingTag = (not m.present) and ' [missing]' or ''
-            local startTag   = (m.name==chainStartName) and ' (Start)' or ''
+        if ImGui.BeginTable('MembersTable', 4, ImGui.TableFlags_Borders) then
+            ImGui.TableSetupColumn('Name', ImGui.TableColumnFlags_WidthFixed, 150)
+            ImGui.TableSetupColumn('Present', ImGui.TableColumnFlags_WidthFixed, 80)
+            ImGui.TableSetupColumn('Enabled', ImGui.TableColumnFlags_WidthFixed, 80)
+            ImGui.TableSetupColumn('Start', ImGui.TableColumnFlags_WidthFixed, 80)
+            ImGui.TableHeadersRow()
 
-            local label = string.format('%s %s%s%s%s', mark, m.name, selfTag, startTag, missingTag)
-
-            if m.present then
-                if ImGui.Selectable(label, false) then
-                    m.enabled = not m.enabled
-                    validateChainStart()
+            for idx, member in ipairs(chainMembers) do
+                ImGui.TableNextRow()
+                ImGui.TableSetColumnIndex(0)
+                ImGui.TextUnformatted(member.name)
+                ImGui.TableSetColumnIndex(1)
+                ImGui.TextUnformatted(member.present and 'Yes' or 'No')
+                ImGui.TableSetColumnIndex(2)
+                local changed
+                changed, chainMembers[idx].enabled = ImGui.Checkbox('##enabled_' .. idx, chainMembers[idx].enabled)
+                ImGui.TableSetColumnIndex(3)
+                if ImGui.RadioButton('##start_' .. idx, chainStartName == member.name) then
+                    chainStartName = member.name
                 end
-            else
-                ImGui.BeginDisabled(true)
-                ImGui.Selectable(label, false)
-                ImGui.EndDisabled()
             end
+
+            ImGui.EndTable()
         end
 
-        ----------------------------------------------------
-        -- CHAIN PREVIEW
-        ----------------------------------------------------
-        ImGui.Separator()
-        ImGui.Text('Chain Preview')
+        ImGui.Spacing()
 
-        local me = trim(mq.TLO.Me.Name() or '')
-        local list = buildSCMList()
+        -- Profiles
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+        ImGui.Text('Profiles')
+        ImGui.Text('═══════════════════════════════════════════════════════════')
 
-        if #list == 0 then
-            ImGui.TextWrapped('Enable at least one other member...')
-        else
-            local parts={me .. ' [controller]'}
-            for _,nm in ipairs(list) do table.insert(parts,nm) end
-            table.insert(parts, me .. ' [end]')
-            ImGui.TextWrapped('%s', table.concat(parts,' -> '))
-        end
+        ImGui.PushItemWidth(150)
+        profileNameBuffer = ImGui.InputText('Profile Name', profileNameBuffer, 256)
+        ImGui.PopItemWidth()
 
-        ----------------------------------------------------
-        -- CONTROLS
-        ----------------------------------------------------
-        if not running then
-            if ImGui.Button('Start##start') then startChain() end
-        else
-            if ImGui.Button(paused and 'Resume##resume' or 'Pause##pause') then
-                togglePause()
-            end
+        ImGui.SameLine()
+        if ImGui.Button('Save Profile', 100, 0) then
+            saveCurrentProfile()
         end
 
         ImGui.SameLine()
-        if ImGui.Button('Reset##reset') then resetChain() end
-
-        ImGui.Text('Status: %s', running and (paused and 'Paused' or 'Running') or 'Stopped')
-        ImGui.Separator()
-
-        ----------------------------------------------------
-        -- LATENCY SETTINGS
-        ----------------------------------------------------
-        ImGui.Text('Latency Settings')
-        ImGui.TextWrapped('Tip: Script automatically learns optimal transfer times. Use manual override for custom tuning.')
-        
-        local prevOverride = latencyStats.manualOverride
-        local overrideStr = string.format('%.1f', prevOverride)
-        overrideStr = ImGui.InputText('Manual Transfer Time (seconds)##latency_override', overrideStr, 16)
-        local newOverride = tonumber(overrideStr) or 0
-        if newOverride < 0 then newOverride = 0 end
-        
-        if newOverride ~= prevOverride then
-            latencyStats.manualOverride = newOverride
-            if newOverride > 0 then
-                addStatus('Transfer time override set to %.1f seconds.', newOverride)
-            else
-                addStatus('Using adaptive latency tracking.')
+        if ImGui.Button('Load Profile', 100, 0) then
+            if currentProfileName ~= '' and profiles[currentProfileName] then
+                loadProfileByName(currentProfileName)
             end
         end
 
+        if ImGui.BeginListBox('##ProfilesList', 0, 100) then
+            local profileNames = {}
+            for nm, _ in pairs(profiles) do
+                table.insert(profileNames, nm)
+            end
+            table.sort(profileNames)
+
+            for _, nm in ipairs(profileNames) do
+                local selected = (currentProfileName == nm)
+                if ImGui.Selectable(nm, selected) then
+                    currentProfileName = nm
+                    profileNameBuffer = nm
+                    loadProfileByName(nm)
+                end
+            end
+            ImGui.EndListBox()
+        end
+
+        ImGui.Spacing()
+
+        -- Chain Control
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+        ImGui.Text('Chain Control')
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+
+        local buttonWidth = 100
+        if ImGui.Button('START CHAIN', buttonWidth, 0) then
+            startChain()
+        end
+
         ImGui.SameLine()
-        if ImGui.Button('Reset to Auto##reset_latency') then
-            latencyStats.manualOverride = 0
+        if ImGui.Button(paused and 'RESUME' or 'PAUSE', buttonWidth, 0) then
+            togglePause()
+        end
+
+        ImGui.SameLine()
+        if ImGui.Button('RESET', buttonWidth, 0) then
+            resetChain()
+        end
+
+        ImGui.Spacing()
+        ImGui.Text('Status: ' .. (running and (paused and 'PAUSED' or 'RUNNING') or 'STOPPED'))
+
+        ImGui.Spacing()
+
+        -- Latency Settings
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+        ImGui.Text('Latency & Timing')
+        ImGui.Text('═══════════════════════════════════════════════════════════')
+
+        ImGui.Text('Transfers: ' .. latencyStats.totalTransfers)
+        ImGui.Text('Avg Time: ' .. string.format('%.2fs', latencyStats.avgTransferTime))
+        ImGui.Text('Samples: ' .. #latencyStats.measurements)
+
+        ImGui.PushItemWidth(100)
+        latencyStats.manualOverride = ImGui.SliderFloat('Manual Override (0=auto)', latencyStats.manualOverride, 0, 30, '%.1f')
+        ImGui.PopItemWidth()
+
+        if ImGui.Button('Reset Latency Stats', 150, 0) then
             latencyStats.measurements = {}
             latencyStats.avgTransferTime = 0
-            addStatus('Latency tracking reset. Now learning...')
-        end
-
-        local modeStr = latencyStats.manualOverride > 0 
-            and string.format('Manual: %.1fs', latencyStats.manualOverride)
-            or string.format('Adaptive: %.1fs (n=%d)', latencyStats.avgTransferTime, #latencyStats.measurements)
-        ImGui.TextDisabled('Mode: %s', modeStr)
-        ImGui.Separator()
-
-        ----------------------------------------------------
-        -- PROFILES
-        ----------------------------------------------------
-        ImGui.Text('Profiles')
-
-        profileNameBuffer = ImGui.InputText('Profile Name##prof_name', profileNameBuffer or '', 64)
-
-        ImGui.SameLine()
-        local canSaveProf = trim(profileNameBuffer)~=''
-        if not canSaveProf then ImGui.BeginDisabled(true) end
-        if ImGui.Button('Save Profile##save_prof') then saveCurrentProfile() end
-        if not canSaveProf then ImGui.EndDisabled() end
-
-        local pnames={}
-        for n,_ in pairs(profiles) do table.insert(pnames,n) end
-        table.sort(pnames)
-
-        if #pnames>0 then
-            local preview = currentProfileName~='' and currentProfileName or 'Select...'
-            if ImGui.BeginCombo('Load Profile##load_prof', preview) then
-                for _,n in ipairs(pnames) do
-                    local sel = (n==currentProfileName)
-                    if ImGui.Selectable(n, sel) then
-                        if not sel then loadProfileByName(n) end
-                    end
-                    if sel then ImGui.SetItemDefaultFocus() end
-                end
-                ImGui.EndCombo()
-            end
-        else
-            ImGui.TextDisabled('No profiles saved.')
-        end
-
-        ImGui.Separator()
-
-        ----------------------------------------------------
-        -- STATUS LOG
-        ----------------------------------------------------
-        ImGui.Text('Status Log:')
-        for _,ln in ipairs(statusLog) do
-            ImGui.TextWrapped('%s', ln)
+            latencyStats.totalTransfers = 0
+            addStatus('Latency stats reset.')
         end
 
         ImGui.End()
-    end)
-
-    if not ok then
-        addStatus('GUI ERROR: %s', tostring(err))
     end
 end
 
 ---------------------------------------------------------------------
--- INIT & LOOP
+-- MAIN LOOP
 ---------------------------------------------------------------------
-local function init()
-    print("\atOriginally created by Alektra <Lederhosen>")
-    print("\agItemPass v" .. SCRIPT_VERSION .. " Loaded")
-
-    addStatus('ItemPass (EMU) loading...')
-    addStatus('Run this script only on the controller toon.')
-
+local function main()
     loadHiddenItems()
     loadItemList()
     loadProfiles()
     refreshChainMembers()
-    scanInventory()
 
-    mq.imgui.init('itempass_ui', renderUI)
-
-    addStatus('Ready. Commands: /itempassui /itempassstart /itempasspause /itempassreset')
+    while true do
+        handleZone()
+        scmTick()
+        renderGUI()
+        mq.delay(10)
+    end
 end
 
-init()
-
-while true do
-    handleZone()
-    chainTick()
-    mq.delay(100)
-    mq.doevents()
-end
+main()
