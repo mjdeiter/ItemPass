@@ -6,6 +6,18 @@ The format follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.1] – 2026-05-01
+
+### Fixed
+- Fixed inventory scanning to correctly count items in bags of different sizes
+- Each bag's actual slot count is now queried independently instead of reusing previous bag's slot count
+- Inventory totals are now reliable regardless of bag arrangement or size variation
+
+### Internal
+- Improved `scanInventory()` function documentation for clarity
+
+---
+
 ## [1.3.0] – 2026-05-01
 
 ### Added
