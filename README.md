@@ -23,6 +23,11 @@ chain so each member can click/use it in sequence.
 - Works with bags and stacked items
 - Robust FSM-based execution (no timing guesswork)
 
+### Inventory Scanning (v1.3.1)
+- **Fixed bag size handling**: Now correctly counts items in bags of different sizes
+- **Accurate item totals**: Each bag's actual slot count is queried independently
+- **Reliable results**: Item counts are now consistent regardless of bag arrangement
+
 ### Adaptive Latency Tracking (v1.3.0)
 - **Auto-Learning Transfer Times**: Script automatically measures each item transfer duration
 - **Rolling Average**: Maintains last 30 measurements for smooth timeout adjustment
@@ -171,6 +176,12 @@ If you need to fine-tune for specific scenarios:
 - Manual override with learned average value (from Status Log)
 - Check for high variance—may indicate network instability
 
+### Inventory Count Incorrect
+- Make sure you're using ItemPass v1.3.1 or later
+- Click "Scan Inventory" button to refresh
+- Check bags are not full or bugged
+- Hidden items won't be counted (see `itempass_hidden.txt`)
+
 ---
 
 ## Advanced Configuration
@@ -190,7 +201,7 @@ local TRADE_MAX_ATTEMPTS = 3           -- Retries before failing
 
 See [CHANGELOG.md](CHANGELOG.md) for full version details.
 
-**Current Version**: 1.3.0 (Adaptive Latency Tracking)
+**Current Version**: 1.3.1 (Inventory Scanning Fix + Adaptive Latency Tracking)
 
 ---
 
