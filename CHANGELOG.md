@@ -6,6 +6,15 @@ The format follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.2] – 2026-05-02
+
+### Fixed
+- Extended inventory slot scanning from slot 30 to slot 32, picking up bags in slots 31 and 32 that were previously invisible to the scanner
+- Bag item scanning now starts at slot index 0 (was 1), recovering items silently missed in the first slot of every bag
+- Both fixes apply to `scanInventory()` and `countItemByName()`
+
+---
+
 ## [1.3.1] – 2026-05-01
 
 ### Fixed

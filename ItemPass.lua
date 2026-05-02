@@ -25,7 +25,7 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.3.0" -- semantic version: MAJOR.MINOR.PATCH
+local SCRIPT_VERSION = "1.3.2" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
@@ -43,7 +43,7 @@ local PROFILE_FILE_PATH = MQROOT .. '/itempass_profiles.txt'
 local HIDDEN_FILE_PATH  = MQROOT .. '/itempass_hidden.txt'
 
 local SLOT_MIN = 0
-local SLOT_MAX = 30
+local SLOT_MAX = 32
 local BASE_TRADE_TIMEOUT      = 20
 local TRADE_MAX_ATTEMPTS = 3
 local MAX_LOG            = 200
@@ -410,7 +410,7 @@ local function countItemByName(name)
             end
 
             if cslots > 0 then
-                for i = 1, cslots do
+                for i = 0, cslots do  -- FIX v1.3.2: start at 0 to catch slot-0 items
                     local inner = it.Item(i)
                     if inner() and inner.ID() ~= 0 then
                         local nm2 = trim(inner.Name() or '')
@@ -438,7 +438,7 @@ local function scanInventory()
             if nm ~= '' and not isItemHidden(nm) then
                 if cslots > 0 then
                     -- FIXED: Use each bag's own cslots, not a previous bag's
-                    for i = 1, cslots do
+                    for i = 0, cslots do  -- FIX v1.3.2: start at 0 to catch slot-0 items
                         local inner = it.Item(i)
                         if inner() and inner.ID() ~= 0 then
                             local nm2 = trim(inner.Name() or '')
