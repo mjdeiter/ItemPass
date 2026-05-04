@@ -7,12 +7,6 @@
 -- After the last member, the item returns to the controller and the chain stops
 -- (unless AUTO_REPEAT_CHAIN is enabled).
 --
--- EMU safe: NO FindItem/FindItemCount. Local inventory via Me.Inventory/Container/Item only.
--- Hidden Items:
---   - Stored in itempass_hidden.txt
---   - Hidden items are filtered from Inventory dropdown & inventory-based autocomplete
---   - Hidden items are NOT removed from Saved Items
---
 -- ItemPass v1.6.0
 -- Experimental additions:
 --   + Speed Mode toggle in UI
@@ -57,7 +51,7 @@
 --
 -- ItemPass v1.4.0
 -- Performance Update:
---   + BASE_TRADE_TIMEOUT reduced from 20s to 5s (more appropriate for EMU server latency)
+--   + BASE_TRADE_TIMEOUT reduced from 20s to 5s
 --   + Adaptive latency seeded at 1.5s baseline (no longer starts blind on first chain)
 --   + Dynamic cast time detection via local inventory scan at chain start
 --   + MEMBER_USE delay now = detected cast time + adaptive network buffer (not flat 3s)
@@ -1361,7 +1355,7 @@ local function renderUI()
         if EXP_speedMode then
             ImGui.TextDisabled(string.format('Give: %.1fs | Use buffer: +%.1fs | Return max: %.1fs',
                 SPEED_GIVE_DELAY, SPEED_USE_BUFFER, SPEED_RETURN_DELAY))
-            ImGui.TextWrapped('Fixed short delays, no adaptive wait. ~2x faster. May miss errors. Use on stable servers only.')
+            ImGui.TextWrapped('Fixed short delays, no adaptive wait. ~2x faster. May miss errors. Use on stable systems only.')
         end
 
         ImGui.Separator()
