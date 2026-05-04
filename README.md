@@ -1,0 +1,112 @@
+# ItemPass
+
+**Controller-based item passing script for Project Lazarus (MQNext / E3Next EMU)**
+
+Passes a clickable item through every group member in order, has each member use it,
+then returns it to the controller. Fully automated, adaptive, and EMU-safe.
+
+---
+
+## Features
+
+| Feature | Status |
+|---|---|
+| FSM-based chain (give → use → return → next) | ✅ Stable |
+| Adaptive latency (learns swap time from live data) | ✅ Stable |
+| Dynamic cast time detection (local inventory scan) | ✅ Stable |
+| Saved items + profiles | ✅ Stable |
+| Inventory autocomplete with fuzzy matching | ✅ Stable |
+| Hidden item list | ✅ Stable |
+| ImGui overlay UI | ✅ Stable |
+| Auto-locate item via `/fic` | 🧪 Experimental |
+| Auto-resume chain after locate pull | 🧪 Experimental |
+| Speed Mode / Fire and Forget | 🧪 Experimental |
+
+---
+
+## EMU Safety
+
+- ❌ No `FindItem` / `FindItemCount`
+- ❌ No unsafe TLO spam
+- ❌ No remote inventory inspection
+- ✅ Local inventory traversal only (`Me.Inventory` / `Container` / `Item`)
+- ✅ All trades via E3's `/giveme` command
+
+---
+
+## Installation
+
+1. Copy `itempass.lua` to your MQNext `lua` folder.
+2. In-game, run: `/lua run itempass`
+3. Use `/itempassui` to toggle the overlay.
+
+---
+
+## Commands
+
+| Command | Action |
+|---|---|
+| `/itempassui` | Toggle UI |
+| `/itempassstart` | Start chain |
+| `/itempasspause` | Pause / resume |
+| `/itempassreset` | Reset chain |
+
+---
+
+## Experimental Features
+
+> These features are isolated from the core FSM. Bugs in the experimental layer
+> cannot corrupt the chain. Toggle them in the UI under the **Experimental** section.
+
+### Auto-locate item
+If the controller doesn't have the item when Start is pressed, the script fires
+`/fic <keyword>` to locate it among group members and pull it to the controller.
+
+- `/fic` only accepts one word — `getFicKeyword()` extracts the longest non-filler
+  word from the item name. Example: "Nimbus of Midnight" → `/fic Midnight`
+- E3 `/fic` output format: `<Name> [Pack] Item Name - bag(N) slot(N) count(N)`
+- The `2147483647` appended to `/giveme` commands is `INT32_MAX` — E3's internal
+  sentinel for name-only lookup. This is not a bug.
+
+### Auto-resume after locate
+When paired with Auto-locate, the chain starts automatically once the item arrives.
+No need to hit Start a second time.
+
+### Speed Mode / Fire and Forget
+Skips all adaptive waits and inventory polling. Uses fixed delays:
+
+| Phase | Delay |
+|---|---|
+| Give → Use | 3.0s |
+| Use → Return | castTime + 2.0s |
+| Return timeout | 4.0s max |
+
+⚠️ Item loss is possible if the server lags. Use only on stable, tested chains.
+
+---
+
+## How It Works
+
+```
+Controller has item
+  └─ Give to Member 1
+       └─ Member 1 uses item
+            └─ Return to Controller
+                 └─ Give to Member 2
+                      └─ ...
+                           └─ Return to Controller → Chain complete
+```
+
+The adaptive latency system measures how long each return transfer actually takes
+and uses that to calibrate wait times automatically over the course of a session.
+
+---
+
+## Version
+
+Current: **v1.6.0**  
+See [CHANGELOG.md](CHANGELOG.md) for full history.
+
+---
+
+*Created by Alektra \<Lederhosen\> — Project Lazarus*

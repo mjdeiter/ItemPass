@@ -12,7 +12,49 @@
 --   - Stored in itempass_hidden.txt
 --   - Hidden items are filtered from Inventory dropdown & inventory-based autocomplete
 --   - Hidden items are NOT removed from Saved Items
-
+--
+-- ItemPass v1.6.0
+-- Experimental additions:
+--   + Speed Mode toggle in UI
+--     Fixed delays: give=3.0s, use=castTime+2.0s, return max=4.0s
+--     No inventory polling in speed mode. ~2x faster than adaptive.
+--   + Auto-resume after /fic locate: paired checkbox next to Auto-locate
+--     When ON: chain starts automatically once item arrives at controller
+--
+-- ItemPass v1.5.1
+-- Experimental Bugfixes:
+--   + Fixed: /fic only accepts one word — now extracts longest non-filler keyword
+--     e.g. "Nimbus of Midnight" -> /fic Midnight (not /fic Nimbus of Midnight)
+--   + Fixed: event parser now matches E3 actual output format:
+--     <Name> [Pack] Item Name - bag(N) slot(N) count(N)
+--     (old pattern "has item" never matched real E3 output)
+--
+-- ItemPass v1.5.0
+-- Experimental Layer:
+--   + Added EXP_autoLocate toggle (UI checkbox under new Experimental section)
+--   + When ON: if controller lacks item at chain start, fires /fic to locate it
+--   + /fic output captured via mq.event; 2-second silence window collects all results
+--   + Pulls matching item to controller via requestItemTransfer (safe, pull-only)
+--   + Chain does NOT auto-resume after pull — user hits Start again manually
+--   + ficTick() runs in chainTick() gating loop; yields scmTick until resolved
+--   + Zero impact when OFF — all EXP code is fully isolated from core FSM
+--
+-- ItemPass v1.4.2
+-- UI / UX:
+--   + Window now opens expanded at 500x700 on first use (was collapsed/tiny)
+--   + Latency section rewritten with plain language:
+--       - "Last chain took" shows total elapsed time for the completed chain (resets on next start)
+--       - "Avg swap time" explains what the learned value means and how many samples it's from
+--       - Override label clarified to "Override swap time (s, 0=auto)"
+--
+-- ItemPass v1.4.1
+-- Bugfix:
+--   + Fixed: collapsing window to title bar permanently hid the UI. ImGui.Begin returns
+--     false on collapse (not just on close), and the old code set showUI=false in that
+--     path, unregistering the window entirely. Fix: leave showUI alone on collapse;
+--     just call ImGui.End() and return. Window stays registered, expands on click.
+--     /itempassui still toggles full hide/show as before.
+--
 -- ItemPass v1.4.0
 -- Performance Update:
 --   + BASE_TRADE_TIMEOUT reduced from 20s to 5s (more appropriate for EMU server latency)
@@ -28,7 +70,7 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.4.0" -- semantic version: MAJOR.MINOR.PATCH
+local SCRIPT_VERSION = "1.6.0" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
@@ -91,6 +133,7 @@ local scm = {
 local hiddenItems        = {}
 local hiddenLookup       = {}
 local lastAutocompleteChoice = nil
+local windowSizeSet          = false  -- true after first SetNextWindowSize call
 
 ---------------------------------------------------------------------
 -- LATENCY TRACKING STATE
@@ -101,6 +144,41 @@ local latencyStats = {
     measurements    = {},
     manualOverride  = 0,    -- 0 = adaptive, >0 = manual seconds
 }
+
+local chainTimer = {
+    startTime = 0,    -- os.time() when chain started
+    lastTotal = nil,  -- seconds the last completed chain took (nil = no chain run yet)
+}
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: Auto-locate item state (SAFE LAYER)
+-- This block is isolated from core FSM. Bugs here cannot corrupt chain.
+---------------------------------------------------------------------
+local EXP_autoLocate  = false
+local ficResults      = {}
+local ficPending      = false
+local ficLastUpdate   = 0
+local FIC_TIMEOUT      = 2   -- seconds of silence = done collecting
+-- Forward declarations so startChain / chainTick can reference these
+-- before the actual definitions appear later in the file.
+local runFicLocate
+local ficTick
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: Speed Mode (SAFE LAYER)
+-- Fire-and-forget: fixed short delays, no inventory polling.
+-- Inspired by hotpotato timing. Routes through controller same as normal.
+---------------------------------------------------------------------
+local EXP_speedMode      = false
+local SPEED_GIVE_DELAY   = 3.0   -- seconds after give before use command (hotpotato: /delay 30 = 3s)
+local SPEED_USE_BUFFER   = 2.0   -- extra seconds added to cast time before pulling back (hotpotato: +20 ticks = 2s)
+local SPEED_RETURN_DELAY = 4.0   -- max seconds to wait for return before proceeding (hotpotato: /delay 40 = 4s)
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: Auto-resume after /fic locate
+---------------------------------------------------------------------
+local ficAutoResume       = false  -- user toggle: auto-start chain after locate+pull
+local ficWaitingForReturn = false  -- internal: item requested, waiting for it to arrive
 
 ---------------------------------------------------------------------
 -- UTILITIES
@@ -532,15 +610,26 @@ local function purgeMissingMembers()
 end
 
 local function buildSCMList()
+    local me = trim(mq.TLO.Me.Name() or '')
     local list = {}
+
+    -- Build list WITHOUT controller
     for _, m in ipairs(chainMembers) do
-        if m.enabled and m.present then table.insert(list, m.name) end
+        if m.enabled and m.present and m.name ~= me then
+            table.insert(list, m.name)
+        end
     end
-    if chainStartName and #list > 1 then
+
+    -- Apply rotation among non-controller members
+    if chainStartName and chainStartName ~= me and #list > 1 then
         local startIdx = nil
         for i, nm in ipairs(list) do
-            if nm == chainStartName then startIdx = i break end
+            if nm == chainStartName then
+                startIdx = i
+                break
+            end
         end
+
         if startIdx and startIdx > 1 then
             local rotated = {}
             for i = startIdx, #list do table.insert(rotated, list[i]) end
@@ -548,6 +637,7 @@ local function buildSCMList()
             list = rotated
         end
     end
+
     return list
 end
 
@@ -687,9 +777,21 @@ local function startChain()
 
     running = true
     paused  = false
+    chainTimer.startTime = os.time()
+    chainTimer.lastTotal = nil  -- reset display until this chain completes
 
     addStatus('Starting chain. Controller=%s. Order=%s', me, table.concat(scm.list,'->'))
-    addStatus('The item must start on the controller (%s).', me)
+
+    -- EXPERIMENTAL: if auto-locate is on and controller is missing the item, attempt /fic
+    if EXP_autoLocate and countItemByName(item) == 0 then
+        addStatus('[EXP] Controller does not have "%s". Attempting locate...', item)
+        runFicLocate(item)
+        -- SAFE EXIT: do not start FSM yet. User hits Start again after item arrives.
+        running = false
+        return
+    else
+        addStatus('The item must start on the controller (%s).', me)
+    end
 end
 
 local function togglePause()
@@ -753,6 +855,7 @@ local function scmTick()
                 addStatus('Controller used "%s". Full round complete. Restarting.', item)
             else
                 addStatus('Controller used "%s". Full round complete. Stopping.', item)
+                chainTimer.lastTotal = os.time() - chainTimer.startTime
                 resetSCMState() running=false paused=false
             end
         end
@@ -760,10 +863,10 @@ local function scmTick()
     end
 
     if scm.phase == 'GIVE_TO_MEMBER' then
-        local adaptiveTimeout = getAdaptiveTradeTimeout()
-        if now - scm.startTime >= adaptiveTimeout then
-            addStatus('Assuming %s received "%s" (timeout: %.1fs). Requesting use.',
-                scm.member, item, adaptiveTimeout)
+        local timeout = EXP_speedMode and SPEED_GIVE_DELAY or getAdaptiveTradeTimeout()
+        if now - scm.startTime >= timeout then
+            addStatus('%sAssuming %s received "%s" (%.1fs). Requesting use.',
+                EXP_speedMode and '[SPEED] ' or '', scm.member, item, timeout)
             scm.phase='MEMBER_USE' scm.startTime=now
             requestRemoteUse(scm.member, item)
         end
@@ -771,9 +874,12 @@ local function scmTick()
     end
 
     if scm.phase == 'MEMBER_USE' then
-        local adaptiveDelay = activeItemCastTime + getAdaptiveRemoteUseDelay()
-        if now - scm.startTime >= adaptiveDelay then
-            addStatus('Requesting return of "%s" from %s.', item, scm.member)
+        local useDelay = EXP_speedMode
+            and (activeItemCastTime + SPEED_USE_BUFFER)
+            or  (activeItemCastTime + getAdaptiveRemoteUseDelay())
+        if now - scm.startTime >= useDelay then
+            addStatus('%sRequesting return of "%s" from %s.',
+                EXP_speedMode and '[SPEED] ' or '', item, scm.member)
             scm.phase='RETURN_TO_ME' scm.startTime=now
             requestItemTransfer(me, scm.member, item)
         end
@@ -781,6 +887,25 @@ local function scmTick()
     end
 
     if scm.phase == 'RETURN_TO_ME' then
+        -- Speed Mode: short fixed timeout then proceed regardless
+        if EXP_speedMode and (now - scm.startTime >= SPEED_RETURN_DELAY) and countItemByName(item) == 0 then
+            addStatus('[SPEED] Return timeout (%.1fs). Assuming in transit, proceeding.', SPEED_RETURN_DELAY)
+            if scm.index < #scm.list then
+                scm.index=scm.index+1 scm.member=scm.list[scm.index]
+                scm.phase='WAIT_HAVE_ITEM' scm.attempts=0 scm.startTime=now
+            else
+                if AUTO_REPEAT_CHAIN then
+                    scm.index=1 scm.member=scm.list[1]
+                    scm.phase='WAIT_HAVE_ITEM' scm.attempts=0 scm.startTime=now
+                    addStatus('[SPEED] Full round complete. Restarting.')
+                else
+                    addStatus('[SPEED] Full round complete. Stopping chain.')
+                    chainTimer.lastTotal = os.time() - chainTimer.startTime
+                    resetSCMState() running=false paused=false
+                end
+            end
+            return
+        end
         if countItemByName(item) > 0 then
             recordTransferTime(now - scm.startTime)
             addStatus('Item "%s" returned from %s.', item, scm.member)
@@ -795,6 +920,7 @@ local function scmTick()
                     addStatus('Full round complete. Restarting.')
                 else
                     addStatus('Full round complete. Stopping chain.')
+                    chainTimer.lastTotal = os.time() - chainTimer.startTime
                     resetSCMState() running=false paused=false
                 end
             end
@@ -819,6 +945,22 @@ local function scmTick()
 end
 
 local function chainTick()
+    -- EXPERIMENTAL: drain /fic results first; yields to scmTick when done
+    if ficPending then
+        if ficTick() then return end
+    end
+
+    -- EXPERIMENTAL: auto-resume -- poll for item arrival after locate pull
+    if ficWaitingForReturn then
+        local item = trim(activeItemName)
+        if item ~= '' and countItemByName(item) > 0 then
+            ficWaitingForReturn = false
+            addStatus('[EXP] Item arrived. Auto-starting chain...')
+            startChain()
+        end
+        return
+    end
+
     scmTick()
 end
 
@@ -831,6 +973,103 @@ mq.bind('/itempasspause', togglePause)
 mq.bind('/itempassreset', resetChain)
 
 ---------------------------------------------------------------------
+-- EXPERIMENTAL: /fic capture event (non-intrusive)
+-- Only active when ficPending=true.
+-- Matches E3 /fic output format:
+--   <Name> [Pack] Item Name - bag(N) slot(N) count(N)
+---------------------------------------------------------------------
+mq.event('itempass_fic_generic', '#*#', function(line)
+    if not ficPending then return end
+    ficLastUpdate = os.time()
+    -- Match E3's actual /fic output: <Who> [Pack] Item Name - bag(...
+    local who, item = line:match('<(%w+)>%s+%[Pack%]%s+(.-)%s+%-')
+    if who and item then
+        table.insert(ficResults, {
+            name = trim(who),
+            item = trim(item)
+        })
+    end
+end)
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: /fic locate runner
+-- /fic only accepts a single word — extract the longest non-filler
+-- word from the item name so we get the most specific match.
+-- e.g. "Nimbus of Midnight" -> "Midnight" / "Amulet of the Void" -> "Amulet"
+---------------------------------------------------------------------
+local FIC_FILLER = {['of']=true,['the']=true,['a']=true,['an']=true,['and']=true}
+
+local function getFicKeyword(itemName)
+    local best = ''
+    for w in itemName:gmatch('%S+') do
+        if not FIC_FILLER[w:lower()] and #w > #best then
+            best = w
+        end
+    end
+    return (best ~= '') and best or itemName
+end
+
+runFicLocate = function(itemName)
+    ficResults    = {}
+    ficPending    = true
+    ficLastUpdate = os.time()
+    local keyword = getFicKeyword(itemName)
+    addStatus('[EXP] Locating "%s" via /fic (keyword: "%s")...', itemName, keyword)
+    mq.cmdf('/fic %s', keyword)
+end
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: ficTick — resolves /fic results after silence window
+-- Returns true while still collecting, false when done.
+---------------------------------------------------------------------
+ficTick = function()
+    if not ficPending then return false end
+
+    -- Still within silence window — keep collecting
+    if os.time() - ficLastUpdate < FIC_TIMEOUT then
+        return true
+    end
+
+    ficPending = false
+
+    local item = trim(activeItemName)
+    local me   = trim(mq.TLO.Me.Name() or '')
+
+    if #ficResults == 0 then
+        addStatus('[EXP] /fic returned no results for "%s".', item)
+        return false
+    end
+
+    -- Find holder by substring match against full item name
+    local target = item:lower()
+    local holder = nil
+    for _, r in ipairs(ficResults) do
+        if r.item:lower():find(target, 1, true) then
+            holder = r.name
+            break
+        end
+    end
+
+    if not holder then
+        addStatus('[EXP] No matching holder found in /fic output.')
+        return false
+    end
+
+    addStatus('[EXP] Found "%s" on %s. Requesting transfer to controller...', item, holder)
+    -- SAFE: always pulls item to controller (me), never to a third party
+    requestItemTransfer(me, holder, item)
+
+    if ficAutoResume then
+        ficWaitingForReturn = true
+        addStatus('[EXP] Auto-resume ON. Will start chain when item arrives.')
+    else
+        addStatus('[EXP] Hit Start when item arrives.')
+    end
+
+    return false
+end
+
+---------------------------------------------------------------------
 -- GUI
 -- Registered via mq.imgui.init — NOT called directly from the main loop.
 -- Wrapped in pcall so any ImGui error logs and recovers instead of killing the script.
@@ -840,9 +1079,16 @@ local function renderUI()
 
     local ok, err = pcall(function()
 
+        -- ImGui.Begin returns false when the window is collapsed to its title bar.
+        -- In that case we must still call ImGui.End(), but we do NOT touch showUI —
+        -- the window is still registered and will re-expand normally.
+        -- showUI is only set to false by /itempassui or by the script itself.
+        if not windowSizeSet then
+            ImGui.SetNextWindowSize(500, 700)
+            windowSizeSet = true
+        end
         local open = ImGui.Begin(string.format('ItemPass v%s', SCRIPT_VERSION))
         if not open then
-            showUI = false
             ImGui.End()
             return
         end
@@ -1032,22 +1278,44 @@ local function renderUI()
         ImGui.Separator()
 
         ----------------------------------------------------
-        -- LATENCY SETTINGS
+        -- TIMING / LATENCY
         ----------------------------------------------------
-        ImGui.Text('Latency Settings')
-        ImGui.TextWrapped('Script learns optimal transfer times automatically. Use manual override to tune.')
+        ImGui.Text('Timing')
 
+        -- Last chain total time
+        if chainTimer.lastTotal then
+            ImGui.Text(string.format('Last chain took: %.0fs', chainTimer.lastTotal))
+        else
+            ImGui.TextDisabled('Last chain took: --')
+        end
+
+        -- Avg swap time explanation + value
+        -- avgTransferTime = average seconds it took the item to physically arrive back
+        -- after being requested. Used to set how long to wait before asking for it back.
+        if latencyStats.manualOverride > 0 then
+            ImGui.Text(string.format('Avg swap time: %.1fs (manual)', latencyStats.manualOverride))
+        else
+            local n = #latencyStats.measurements
+            if n == 0 then
+                ImGui.TextDisabled(string.format('Avg swap time: %.1fs (estimated, no data yet)', latencyStats.avgTransferTime))
+            else
+                ImGui.Text(string.format('Avg swap time: %.1fs (learned from %d swap%s)', latencyStats.avgTransferTime, n, n==1 and '' or 's'))
+            end
+        end
+        ImGui.TextWrapped('Swap time = how long each individual item hand-off takes. The script learns this automatically and uses it to set wait times.')
+
+        -- Manual override
         local prevOverride = latencyStats.manualOverride
-        local overrideStr  = ImGui.InputText('Manual Transfer Time (s)##latency_override',
+        local overrideStr  = ImGui.InputText('Override swap time (s, 0=auto)##latency_override',
                                 string.format('%.1f', prevOverride), 16)
         local newOverride  = tonumber(overrideStr) or 0
         if newOverride < 0 then newOverride = 0 end
         if newOverride ~= prevOverride then
             latencyStats.manualOverride = newOverride
             if newOverride > 0 then
-                addStatus('Transfer time override set to %.1f seconds.', newOverride)
+                addStatus('Swap time override set to %.1f seconds.', newOverride)
             else
-                addStatus('Using adaptive latency tracking.')
+                addStatus('Back to auto swap time.')
             end
         end
 
@@ -1056,16 +1324,46 @@ local function renderUI()
             latencyStats.manualOverride  = 0
             latencyStats.measurements    = {}
             latencyStats.avgTransferTime = 1.5
-            addStatus('Latency tracking reset.')
+            addStatus('Swap time reset to auto.')
         end
 
-        local modeStr
-        if latencyStats.manualOverride > 0 then
-            modeStr = string.format('Manual: %.1fs', latencyStats.manualOverride)
-        else
-            modeStr = string.format('Adaptive: %.1fs (n=%d)', latencyStats.avgTransferTime, #latencyStats.measurements)
+        ImGui.Separator()
+
+        ----------------------------------------------------
+        -- EXPERIMENTAL (may have bugs — safe layer only)
+        ----------------------------------------------------
+
+        -- Auto-locate + auto-resume
+        EXP_autoLocate = ImGui.Checkbox('Auto-locate item##exp_locate', EXP_autoLocate)
+        if EXP_autoLocate then
+            ImGui.SameLine()
+            ficAutoResume = ImGui.Checkbox('Auto-resume after pull##exp_resume', ficAutoResume)
         end
-        ImGui.TextDisabled(string.format('Mode: %s', modeStr))
+        if EXP_autoLocate then
+            if ficPending then
+                ImGui.TextDisabled('Locate: searching via /fic...')
+            elseif ficWaitingForReturn then
+                ImGui.TextDisabled('Locate: item requested, waiting for arrival...')
+            elseif #ficResults > 0 then
+                ImGui.TextDisabled(string.format('Locate: last scan found %d result(s)', #ficResults))
+            else
+                ImGui.TextDisabled('Locate: idle')
+            end
+            if not ficAutoResume then
+                ImGui.TextWrapped('Auto-locate: finds and pulls item. Hit Start again after pull.')
+            else
+                ImGui.TextWrapped('Auto-locate + Auto-resume: finds, pulls, then starts chain automatically.')
+            end
+        end
+
+        -- Speed Mode
+        EXP_speedMode = ImGui.Checkbox('Speed Mode##exp_speed', EXP_speedMode)
+        if EXP_speedMode then
+            ImGui.TextDisabled(string.format('Give: %.1fs | Use buffer: +%.1fs | Return max: %.1fs',
+                SPEED_GIVE_DELAY, SPEED_USE_BUFFER, SPEED_RETURN_DELAY))
+            ImGui.TextWrapped('Fixed short delays, no adaptive wait. ~2x faster. May miss errors. Use on stable servers only.')
+        end
+
         ImGui.Separator()
 
         ----------------------------------------------------
