@@ -1,4 +1,4 @@
--- ItemPass (Project Lazarus EMU / MQNext / E3Next)
+ ItemPass (Project Lazarus EMU / MQNext / E3Next)
 -- Controller-based item passing script:
 --   Controller starts with the item
 --   -> sends item to each enabled group member in order
@@ -6,6 +6,16 @@
 --   -> pulls the item back
 -- After the last member, the item returns to the controller and the chain stops
 -- (unless AUTO_REPEAT_CHAIN is enabled).
+--
+-- ItemPass v1.7.0
+-- Speed Mode Pipeline refactor:
+--   + Speed Mode now uses a pre-built flat pipeline of {delay, fn} steps
+--   + Pipeline built once at chain start (buildSpeedPipeline)
+--   + Uses os.clock() for sub-second precision (was os.time() = 1s granularity)
+--   + Dedicated speedTick() replaces inline speed branches in scmTick()
+--   + chainTick() routes to speedTick vs scmTick based on EXP_speedMode
+--   + New phases: SPEED_PIPELINE (stepping) and SPEED_WAIT_RETURN (polling)
+--   + 10s timeout on final return with auto-retry pull
 --
 -- ItemPass v1.6.0
 -- Experimental additions:
@@ -64,7 +74,7 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.6.0" -- semantic version: MAJOR.MINOR.PATCH
+local SCRIPT_VERSION = "1.7.0" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
@@ -160,13 +170,18 @@ local ficTick
 
 ---------------------------------------------------------------------
 -- EXPERIMENTAL: Speed Mode (SAFE LAYER)
--- Fire-and-forget: fixed short delays, no inventory polling.
--- Inspired by hotpotato timing. Routes through controller same as normal.
+-- Pipeline-based: pre-built sequence of {delay, fn} steps fired in order.
+-- Uses os.clock() for sub-second precision. No inventory polling during pipeline.
 ---------------------------------------------------------------------
 local EXP_speedMode      = false
-local SPEED_GIVE_DELAY   = 3.0   -- seconds after give before use command (hotpotato: /delay 30 = 3s)
-local SPEED_USE_BUFFER   = 2.0   -- extra seconds added to cast time before pulling back (hotpotato: +20 ticks = 2s)
-local SPEED_RETURN_DELAY = 4.0   -- max seconds to wait for return before proceeding (hotpotato: /delay 40 = 4s)
+local SPEED_GIVE_DELAY   = 3.0   -- seconds to wait after give before issuing /useitem
+local SPEED_USE_DELAY    = 2.0   -- extra seconds added to cast time before passing on
+local SPEED_RETURN_DELAY = 4.0   -- legacy constant (kept for UI display; not used in pipeline path)
+
+-- Pipeline state vars
+local speedPhaseStart    = 0      -- os.clock() timestamp of when current pipeline step started
+local speedPipeline      = {}     -- pre-built sequence of {delay, fn} steps
+local speedPipelineIndex = 1      -- current position in the pipeline
 
 ---------------------------------------------------------------------
 -- EXPERIMENTAL: Auto-resume after /fic locate
@@ -741,12 +756,110 @@ end
 local function resetSCMState()
     scm.list={} scm.index=0 scm.member=nil
     scm.phase='IDLE' scm.attempts=0 scm.startTime=0
+    -- also reset pipeline state so speedTick starts clean
+    speedPipeline      = {}
+    speedPipelineIndex = 1
+    speedPhaseStart    = 0
 end
 
 local function resetChain()
     running=false paused=false
     resetSCMState()
     addStatus('Chain reset.')
+end
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: Speed Mode — pipeline builder
+-- Builds a flat ordered list of {delay, fn} steps at chain start.
+-- Each step fires delay seconds after the *previous* step completed.
+-- Controller → M1 → M2 → ... → Mn → Controller (return)
+---------------------------------------------------------------------
+local function buildSpeedPipeline(list, controller, itemName)
+    local steps    = {}
+    local castWait = activeItemCastTime + SPEED_USE_DELAY
+
+    -- Step 0: give item to first member immediately
+    local first = list[1]
+    table.insert(steps, {delay=0.0, fn=function()
+        addStatus('[SPD] Sending "%s" to %s.', itemName, first)
+        requestItemTransfer(first, controller, itemName)
+    end})
+
+    for i, member in ipairs(list) do
+        local m = member  -- capture for closure
+
+        -- After SPEED_GIVE_DELAY: tell this member to use the item
+        table.insert(steps, {delay=SPEED_GIVE_DELAY, fn=function()
+            addStatus('[SPD] Telling %s to use.', m)
+            requestRemoteUse(m, itemName)
+        end})
+
+        if i < #list then
+            -- After cast+buffer: pass item to next member
+            local nxt = list[i+1]
+            table.insert(steps, {delay=castWait, fn=function()
+                addStatus('[SPD] %s -> %s.', m, nxt)
+                requestItemTransfer(nxt, m, itemName)
+            end})
+        else
+            -- Last member: pull item back to controller
+            table.insert(steps, {delay=castWait, fn=function()
+                addStatus('[SPD] Pulling back from %s.', m)
+                requestItemTransfer(controller, m, itemName)
+            end})
+        end
+    end
+
+    return steps
+end
+
+---------------------------------------------------------------------
+-- EXPERIMENTAL: speedTick — advances the pipeline each frame
+-- Replaces inline speed-mode branches that were inside scmTick().
+-- Phases used: SPEED_PIPELINE (stepping), SPEED_WAIT_RETURN (polling).
+---------------------------------------------------------------------
+local function speedTick()
+    if scm.phase == 'IDLE' or not running or paused then return end
+    local me   = trim(mq.TLO.Me.Name() or '')
+    local item = trim(activeItemName)
+    if item == '' then return end
+    local now  = os.clock()
+
+    -- Advance through pipeline steps
+    if scm.phase == 'SPEED_PIPELINE' then
+        if speedPipelineIndex > #speedPipeline then
+            -- All steps fired; switch to polling for return
+            scm.phase       = 'SPEED_WAIT_RETURN'
+            speedPhaseStart = now
+            return
+        end
+        local step = speedPipeline[speedPipelineIndex]
+        if now - speedPhaseStart >= step.delay then
+            step.fn()
+            speedPipelineIndex = speedPipelineIndex + 1
+            speedPhaseStart    = now
+        end
+        return
+    end
+
+    -- Poll for item return after last pull request
+    if scm.phase == 'SPEED_WAIT_RETURN' then
+        if countItemByName(item) > 0 then
+            chainTimer.lastTotal = os.time() - chainTimer.startTime
+            addStatus('[SPD] Pipeline complete in %.0fs.', chainTimer.lastTotal)
+            resetSCMState()
+            running = false
+            paused  = false
+            return
+        end
+        -- Retry pull if we've been waiting too long (item may have stalled)
+        if now - speedPhaseStart >= 10.0 then
+            addStatus('[SPD] Timeout waiting for return. Retrying pull from %s.', scm.list[#scm.list])
+            requestItemTransfer(me, scm.list[#scm.list], item)
+            speedPhaseStart = now
+        end
+        return
+    end
 end
 
 local function startChain()
@@ -765,7 +878,6 @@ local function startChain()
 
     scm.index    = 1
     scm.member   = scm.list[1]
-    scm.phase    = 'WAIT_HAVE_ITEM'
     scm.attempts = 0
     scm.startTime= os.time()
 
@@ -785,6 +897,17 @@ local function startChain()
         return
     else
         addStatus('The item must start on the controller (%s).', me)
+    end
+
+    -- Route to speed pipeline or normal adaptive FSM
+    if EXP_speedMode then
+        speedPipeline      = buildSpeedPipeline(scm.list, me, item)
+        speedPipelineIndex = 1
+        speedPhaseStart    = os.clock()
+        scm.phase          = 'SPEED_PIPELINE'
+        addStatus('[SPD] Pipeline built (%d steps). Fire!', #speedPipeline)
+    else
+        scm.phase = 'WAIT_HAVE_ITEM'
     end
 end
 
@@ -809,7 +932,7 @@ local function handleZone()
 end
 
 ---------------------------------------------------------------------
--- FSM TICK
+-- FSM TICK (adaptive / normal mode)
 ---------------------------------------------------------------------
 local function scmTick()
     if scm.phase=='IDLE' or not running or paused then return end
@@ -857,10 +980,9 @@ local function scmTick()
     end
 
     if scm.phase == 'GIVE_TO_MEMBER' then
-        local timeout = EXP_speedMode and SPEED_GIVE_DELAY or getAdaptiveTradeTimeout()
-        if now - scm.startTime >= timeout then
-            addStatus('%sAssuming %s received "%s" (%.1fs). Requesting use.',
-                EXP_speedMode and '[SPEED] ' or '', scm.member, item, timeout)
+        if now - scm.startTime >= getAdaptiveTradeTimeout() then
+            addStatus('Assuming %s received "%s" (%.1fs). Requesting use.',
+                scm.member, item, getAdaptiveTradeTimeout())
             scm.phase='MEMBER_USE' scm.startTime=now
             requestRemoteUse(scm.member, item)
         end
@@ -868,12 +990,9 @@ local function scmTick()
     end
 
     if scm.phase == 'MEMBER_USE' then
-        local useDelay = EXP_speedMode
-            and (activeItemCastTime + SPEED_USE_BUFFER)
-            or  (activeItemCastTime + getAdaptiveRemoteUseDelay())
+        local useDelay = activeItemCastTime + getAdaptiveRemoteUseDelay()
         if now - scm.startTime >= useDelay then
-            addStatus('%sRequesting return of "%s" from %s.',
-                EXP_speedMode and '[SPEED] ' or '', item, scm.member)
+            addStatus('Requesting return of "%s" from %s.', item, scm.member)
             scm.phase='RETURN_TO_ME' scm.startTime=now
             requestItemTransfer(me, scm.member, item)
         end
@@ -881,25 +1000,6 @@ local function scmTick()
     end
 
     if scm.phase == 'RETURN_TO_ME' then
-        -- Speed Mode: short fixed timeout then proceed regardless
-        if EXP_speedMode and (now - scm.startTime >= SPEED_RETURN_DELAY) and countItemByName(item) == 0 then
-            addStatus('[SPEED] Return timeout (%.1fs). Assuming in transit, proceeding.', SPEED_RETURN_DELAY)
-            if scm.index < #scm.list then
-                scm.index=scm.index+1 scm.member=scm.list[scm.index]
-                scm.phase='WAIT_HAVE_ITEM' scm.attempts=0 scm.startTime=now
-            else
-                if AUTO_REPEAT_CHAIN then
-                    scm.index=1 scm.member=scm.list[1]
-                    scm.phase='WAIT_HAVE_ITEM' scm.attempts=0 scm.startTime=now
-                    addStatus('[SPEED] Full round complete. Restarting.')
-                else
-                    addStatus('[SPEED] Full round complete. Stopping chain.')
-                    chainTimer.lastTotal = os.time() - chainTimer.startTime
-                    resetSCMState() running=false paused=false
-                end
-            end
-            return
-        end
         if countItemByName(item) > 0 then
             recordTransferTime(now - scm.startTime)
             addStatus('Item "%s" returned from %s.', item, scm.member)
@@ -939,12 +1039,12 @@ local function scmTick()
 end
 
 local function chainTick()
-    -- EXPERIMENTAL: drain /fic results first; yields to scmTick when done
+    -- EXPERIMENTAL: drain /fic results first; yields to main tick when done
     if ficPending then
         if ficTick() then return end
     end
 
-    -- EXPERIMENTAL: auto-resume -- poll for item arrival after locate pull
+    -- EXPERIMENTAL: auto-resume — poll for item arrival after locate pull
     if ficWaitingForReturn then
         local item = trim(activeItemName)
         if item ~= '' and countItemByName(item) > 0 then
@@ -955,7 +1055,12 @@ local function chainTick()
         return
     end
 
-    scmTick()
+    -- Route to the appropriate tick based on mode
+    if EXP_speedMode then
+        speedTick()
+    else
+        scmTick()
+    end
 end
 
 ---------------------------------------------------------------------
@@ -1284,8 +1389,6 @@ local function renderUI()
         end
 
         -- Avg swap time explanation + value
-        -- avgTransferTime = average seconds it took the item to physically arrive back
-        -- after being requested. Used to set how long to wait before asking for it back.
         if latencyStats.manualOverride > 0 then
             ImGui.Text(string.format('Avg swap time: %.1fs (manual)', latencyStats.manualOverride))
         else
@@ -1353,9 +1456,9 @@ local function renderUI()
         -- Speed Mode
         EXP_speedMode = ImGui.Checkbox('Speed Mode##exp_speed', EXP_speedMode)
         if EXP_speedMode then
-            ImGui.TextDisabled(string.format('Give: %.1fs | Use buffer: +%.1fs | Return max: %.1fs',
-                SPEED_GIVE_DELAY, SPEED_USE_BUFFER, SPEED_RETURN_DELAY))
-            ImGui.TextWrapped('Fixed short delays, no adaptive wait. ~2x faster. May miss errors. Use on stable systems only.')
+            ImGui.TextDisabled(string.format('Give: %.1fs | Use buffer: +%.1fs | (pipeline, no adaptive wait)',
+                SPEED_GIVE_DELAY, SPEED_USE_DELAY))
+            ImGui.TextWrapped('Pre-built pipeline: fires all commands up front with fixed delays. ~2x faster. Use on stable systems only.')
         end
 
         ImGui.Separator()
