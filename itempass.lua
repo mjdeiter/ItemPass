@@ -1,4 +1,4 @@
- ItemPass (Project Lazarus EMU / MQNext / E3Next)
+-- ItemPass (Project Lazarus EMU / MQNext / E3Next)
 -- Controller-based item passing script:
 --   Controller starts with the item
 --   -> sends item to each enabled group member in order
@@ -27,7 +27,7 @@
 --
 -- ItemPass v1.5.1
 -- Experimental Bugfixes:
---   + Fixed: /fic only accepts one word — now extracts longest non-filler keyword
+--   + Fixed: /fic only accepts one word -- now extracts longest non-filler keyword
 --     e.g. "Nimbus of Midnight" -> /fic Midnight (not /fic Nimbus of Midnight)
 --   + Fixed: event parser now matches E3 actual output format:
 --     <Name> [Pack] Item Name - bag(N) slot(N) count(N)
@@ -39,9 +39,9 @@
 --   + When ON: if controller lacks item at chain start, fires /fic to locate it
 --   + /fic output captured via mq.event; 2-second silence window collects all results
 --   + Pulls matching item to controller via requestItemTransfer (safe, pull-only)
---   + Chain does NOT auto-resume after pull — user hits Start again manually
+--   + Chain does NOT auto-resume after pull -- user hits Start again manually
 --   + ficTick() runs in chainTick() gating loop; yields scmTick until resolved
---   + Zero impact when OFF — all EXP code is fully isolated from core FSM
+--   + Zero impact when OFF -- all EXP code is fully isolated from core FSM
 --
 -- ItemPass v1.4.2
 -- UI / UX:
@@ -769,10 +769,10 @@ local function resetChain()
 end
 
 ---------------------------------------------------------------------
--- EXPERIMENTAL: Speed Mode — pipeline builder
+-- EXPERIMENTAL: Speed Mode -- pipeline builder
 -- Builds a flat ordered list of {delay, fn} steps at chain start.
 -- Each step fires delay seconds after the *previous* step completed.
--- Controller → M1 → M2 → ... → Mn → Controller (return)
+-- Controller -> M1 -> M2 -> ... -> Mn -> Controller (return)
 ---------------------------------------------------------------------
 local function buildSpeedPipeline(list, controller, itemName)
     local steps    = {}
@@ -814,7 +814,7 @@ local function buildSpeedPipeline(list, controller, itemName)
 end
 
 ---------------------------------------------------------------------
--- EXPERIMENTAL: speedTick — advances the pipeline each frame
+-- EXPERIMENTAL: speedTick -- advances the pipeline each frame
 -- Replaces inline speed-mode branches that were inside scmTick().
 -- Phases used: SPEED_PIPELINE (stepping), SPEED_WAIT_RETURN (polling).
 ---------------------------------------------------------------------
@@ -1044,7 +1044,7 @@ local function chainTick()
         if ficTick() then return end
     end
 
-    -- EXPERIMENTAL: auto-resume — poll for item arrival after locate pull
+    -- EXPERIMENTAL: auto-resume -- poll for item arrival after locate pull
     if ficWaitingForReturn then
         local item = trim(activeItemName)
         if item ~= '' and countItemByName(item) > 0 then
@@ -1092,7 +1092,7 @@ end)
 
 ---------------------------------------------------------------------
 -- EXPERIMENTAL: /fic locate runner
--- /fic only accepts a single word — extract the longest non-filler
+-- /fic only accepts a single word -- extract the longest non-filler
 -- word from the item name so we get the most specific match.
 -- e.g. "Nimbus of Midnight" -> "Midnight" / "Amulet of the Void" -> "Amulet"
 ---------------------------------------------------------------------
@@ -1118,13 +1118,13 @@ runFicLocate = function(itemName)
 end
 
 ---------------------------------------------------------------------
--- EXPERIMENTAL: ficTick — resolves /fic results after silence window
+-- EXPERIMENTAL: ficTick -- resolves /fic results after silence window
 -- Returns true while still collecting, false when done.
 ---------------------------------------------------------------------
 ficTick = function()
     if not ficPending then return false end
 
-    -- Still within silence window — keep collecting
+    -- Still within silence window -- keep collecting
     if os.time() - ficLastUpdate < FIC_TIMEOUT then
         return true
     end
@@ -1170,7 +1170,7 @@ end
 
 ---------------------------------------------------------------------
 -- GUI
--- Registered via mq.imgui.init — NOT called directly from the main loop.
+-- Registered via mq.imgui.init -- NOT called directly from the main loop.
 -- Wrapped in pcall so any ImGui error logs and recovers instead of killing the script.
 ---------------------------------------------------------------------
 local function renderUI()
@@ -1179,7 +1179,7 @@ local function renderUI()
     local ok, err = pcall(function()
 
         -- ImGui.Begin returns false when the window is collapsed to its title bar.
-        -- In that case we must still call ImGui.End(), but we do NOT touch showUI —
+        -- In that case we must still call ImGui.End(), but we do NOT touch showUI --
         -- the window is still registered and will re-expand normally.
         -- showUI is only set to false by /itempassui or by the script itself.
         if not windowSizeSet then
@@ -1427,7 +1427,7 @@ local function renderUI()
         ImGui.Separator()
 
         ----------------------------------------------------
-        -- EXPERIMENTAL (may have bugs — safe layer only)
+        -- EXPERIMENTAL (may have bugs -- safe layer only)
         ----------------------------------------------------
 
         -- Auto-locate + auto-resume
