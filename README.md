@@ -24,16 +24,6 @@ then returns it to the controller. Fully automated, adaptive, and EMU-safe.
 
 ---
 
-## EMU Safety
-
-- ❌ No `FindItem` / `FindItemCount`
-- ❌ No unsafe TLO spam
-- ❌ No remote inventory inspection
-- ✅ Local inventory traversal only (`Me.Inventory` / `Container` / `Item`)
-- ✅ All trades via E3's `/giveme` command
-
----
-
 ## Installation
 
 1. Copy `itempass.lua` to your MQNext `lua` folder.
