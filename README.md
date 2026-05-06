@@ -3,7 +3,7 @@
 **Controller-based item passing script for Project Lazarus (MQNext / E3Next EMU)**
 
 Passes a clickable item through every group member in order, has each member use it,
-then returns it to the controller. Fully automated, adaptive, and EMU-safe.
+then returns it to the controller. Fully automate and adaptive.
 
 ---
 
