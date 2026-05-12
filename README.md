@@ -6,6 +6,8 @@ Passes a clickable item through every group member in order, has each member use
 then returns it to the controller. Fully automated and adaptive.
 
 ---
+<img width="878" height="950" alt="image" src="https://github.com/user-attachments/assets/692636e3-082c-4ba3-a8e7-4db350e6b8f5" />
+
 
 ## Features
 
