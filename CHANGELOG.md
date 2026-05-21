@@ -4,6 +4,17 @@ All notable changes to ItemPass are documented here.
 
 ---
 
+## [1.7.1] - 2026-05-21
+
+### Bugfix
+- **Group member checkboxes now default to unchecked on load** - previously all group
+  members were added to the chain list with `enabled = true`, causing every member to
+  be selected automatically when the script loaded or a new member joined. Members are
+  now inserted with `enabled = false` so the user explicitly opts each toon in before
+  starting a chain. Applies to both group members and the controller toon itself.
+
+---
+
 ## [1.7.0] - 2026-05-04
 
 ### Speed Mode - Pipeline Refactor
