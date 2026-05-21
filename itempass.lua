@@ -581,7 +581,7 @@ local function refreshChainMembers()
                     if m.name == nm then m.present=true found=true break end
                 end
                 if not found then
-                    table.insert(chainMembers, {name=nm, enabled=true, present=true})
+                    table.insert(chainMembers, {name=nm, enabled=false, present=true})
                 end
             end
         end
@@ -594,7 +594,7 @@ local function refreshChainMembers()
             if m.name == me then m.present=true found=true break end
         end
         if not found then
-            table.insert(chainMembers, {name=me, enabled=true, present=true})
+            table.insert(chainMembers, {name=me, enabled=false, present=true})
         end
     end
 
