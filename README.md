@@ -98,7 +98,7 @@ Speed Mode bypasses this entirely with a pre-built command pipeline.
 
 ## Version
 
-Current: **v1.7.0**
+Current: **v1.7.1**
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ---
