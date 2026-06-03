@@ -95,6 +95,7 @@ local SCRIPT_VERSION = "1.7.2" -- semantic version: MAJOR.MINOR.PATCH
 local function checkForUpdate()
     local ok, http = pcall(require, 'socket.http')
     if not ok then return end
+    addStatus('Checking for updates...')
     pcall(function()
         local body, code = http.request('https://raw.githubusercontent.com/mjdeiter/ItemPass/main/version.txt')
         if code == 200 and body then
