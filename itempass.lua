@@ -7,7 +7,22 @@
 -- After the last member, the item returns to the controller and the chain stops
 -- (unless AUTO_REPEAT_CHAIN is enabled).
 --
--- ItemPass v1.7.0
+-- ItemPass v1.7.2
+-- Bugfixes + Debug Logging:
+--   + Fixed: controller was excluded from rotation due to m.name ~= me filter in
+--     buildSCMList(); checked in UI but never actually in the chain
+--   + Fixed: Chain Preview showed [controller]/[end] bookends regardless of actual
+--     inclusion; now shows [click] at real position and [return] when not in rotation
+--   + Fixed: Speed Mode -- controller-first self-transfer wasted full SPEED_GIVE_DELAY;
+--     give step is now skipped and /useitem fires immediately
+--   + Fixed: Speed Mode -- controller-last useDelay was 0 (item not yet transferred);
+--     now uses SPEED_GIVE_DELAY for all non-first positions
+--   + Fixed: Speed Mode -- SPEED_WAIT_RETURN hung forever when controller was last
+--     (item consumed/used, countItemByName always 0); completion is now timer-based
+--     via speedControllerIsLast flag (castTime + 1.5s buffer)
+--   + Added: Debug logging mode -- UI checkbox writes all status + verbose [DBG] FSM
+--     tracing to itempass_debug.txt; gated behind verbose param so render loop never
+--     triggers file I/O
 -- Speed Mode Pipeline refactor:
 --   + Speed Mode now uses a pre-built flat pipeline of {delay, fn} steps
 --   + Pipeline built once at chain start (buildSpeedPipeline)
@@ -74,7 +89,7 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 -- VERSION / CREDITS
 ---------------------------------------------------------------------
-local SCRIPT_VERSION = "1.7.0" -- semantic version: MAJOR.MINOR.PATCH
+local SCRIPT_VERSION = "1.7.2" -- semantic version: MAJOR.MINOR.PATCH
 
 ---------------------------------------------------------------------
 -- CONFIG
@@ -89,6 +104,7 @@ local MQROOT            = mq.TLO.MacroQuest.Path() or '.'
 local ITEM_FILE_PATH    = MQROOT .. '/itempass_items.txt'
 local PROFILE_FILE_PATH = MQROOT .. '/itempass_profiles.txt'
 local HIDDEN_FILE_PATH  = MQROOT .. '/itempass_hidden.txt'
+local DEBUG_LOG_PATH    = MQROOT .. '/itempass_debug.txt'
 
 local SLOT_MIN           = 0
 local SLOT_MAX           = 32
@@ -138,6 +154,7 @@ local hiddenItems        = {}
 local hiddenLookup       = {}
 local lastAutocompleteChoice = nil
 local windowSizeSet          = false  -- true after first SetNextWindowSize call
+local debugMode              = false  -- when true, verbose FSM events written to DEBUG_LOG_PATH
 
 ---------------------------------------------------------------------
 -- LATENCY TRACKING STATE
@@ -207,6 +224,23 @@ local function addStatus(fmt, ...)
     table.insert(statusLog, line)
     if #statusLog > MAX_LOG then table.remove(statusLog, 1) end
     print(line)
+    -- When debug mode is on, every status line is appended to the log file
+    -- so you can paste the full session into chat for diagnosis.
+    if debugMode then
+        local f = io.open(DEBUG_LOG_PATH, 'a')
+        if f then f:write(line .. '\n') f:close() end
+    end
+end
+
+-- debugLog: verbose FSM tracing, only written when debugMode is on.
+-- Does NOT appear in the in-game status panel -- keeps it from flooding.
+local function debugLog(fmt, ...)
+    if not debugMode then return end
+    local msg  = string.format(fmt, ...)
+    local line = string.format('[%s] [DBG] %s', timestamp(), msg)
+    print(line)
+    local f = io.open(DEBUG_LOG_PATH, 'a')
+    if f then f:write(line .. '\n') f:close() end
 end
 
 local function fileExists(path)
@@ -618,19 +652,34 @@ local function purgeMissingMembers()
     addStatus('Purged missing members. Remaining: %d.', #chainMembers)
 end
 
-local function buildSCMList()
+local function buildSCMList(verbose)
     local me = trim(mq.TLO.Me.Name() or '')
     local list = {}
 
-    -- Build list WITHOUT controller
+    -- Build list INCLUDING controller if they are enabled.
+    -- USE_LOCAL in scmTick() handles the controller's self-click when their
+    -- name appears in the list; excluding them here was preventing that branch
+    -- from ever being reached.
+    -- verbose=true only when called from startChain; Chain Preview passes no arg
+    -- so debugLog is never called from the render loop (prevents IO flood on Windows).
     for _, m in ipairs(chainMembers) do
-        if m.enabled and m.present and m.name ~= me then
+        if verbose then
+            debugLog('buildSCMList: checking %s | enabled=%s present=%s',
+                m.name, tostring(m.enabled), tostring(m.present))
+        end
+        if m.enabled and m.present then
             table.insert(list, m.name)
         end
     end
 
-    -- Apply rotation among non-controller members
-    if chainStartName and chainStartName ~= me and #list > 1 then
+    if verbose then
+        debugLog('buildSCMList: raw list = [%s]', table.concat(list, ', '))
+        debugLog('buildSCMList: controller = %s | in list = %s',
+            me, tostring((function() for _,n in ipairs(list) do if n==me then return true end end return false end)()))
+    end
+
+    -- Apply rotation among all enabled members (controller included)
+    if chainStartName and #list > 1 then
         local startIdx = nil
         for i, nm in ipairs(list) do
             if nm == chainStartName then
@@ -639,14 +688,25 @@ local function buildSCMList()
             end
         end
 
+        if verbose then
+            debugLog('buildSCMList: chainStartName=%s startIdx=%s',
+                tostring(chainStartName), tostring(startIdx))
+        end
+
         if startIdx and startIdx > 1 then
             local rotated = {}
             for i = startIdx, #list do table.insert(rotated, list[i]) end
             for i = 1, startIdx-1 do table.insert(rotated, list[i]) end
             list = rotated
+            if verbose then
+                debugLog('buildSCMList: rotated list = [%s]', table.concat(list, ', '))
+            end
         end
     end
 
+    if verbose then
+        debugLog('buildSCMList: final list = [%s]', table.concat(list, ', '))
+    end
     return list
 end
 
@@ -757,9 +817,10 @@ local function resetSCMState()
     scm.list={} scm.index=0 scm.member=nil
     scm.phase='IDLE' scm.attempts=0 scm.startTime=0
     -- also reset pipeline state so speedTick starts clean
-    speedPipeline      = {}
-    speedPipelineIndex = 1
-    speedPhaseStart    = 0
+    speedPipeline         = {}
+    speedPipelineIndex    = 1
+    speedPhaseStart       = 0
+    speedControllerIsLast = false
 end
 
 local function resetChain()
@@ -778,18 +839,29 @@ local function buildSpeedPipeline(list, controller, itemName)
     local steps    = {}
     local castWait = activeItemCastTime + SPEED_USE_DELAY
 
-    -- Step 0: give item to first member immediately
+    -- Step 0: give item to first member.
+    -- If the first member IS the controller they already have the item,
+    -- so skip the give and go straight to use (saves SPEED_GIVE_DELAY seconds).
     local first = list[1]
-    table.insert(steps, {delay=0.0, fn=function()
-        addStatus('[SPD] Sending "%s" to %s.', itemName, first)
-        requestItemTransfer(first, controller, itemName)
-    end})
+    if first ~= controller then
+        table.insert(steps, {delay=0.0, fn=function()
+            addStatus('[SPD] Sending "%s" to %s.', itemName, first)
+            requestItemTransfer(first, controller, itemName)
+        end})
+    else
+        addStatus('[SPD] Controller is first -- skipping self-give, going straight to use.')
+    end
 
     for i, member in ipairs(list) do
         local m = member  -- capture for closure
 
-        -- After SPEED_GIVE_DELAY: tell this member to use the item
-        table.insert(steps, {delay=SPEED_GIVE_DELAY, fn=function()
+        -- After SPEED_GIVE_DELAY: tell this member to use the item.
+        -- useDelay = 0 ONLY when controller is first and the give step was skipped
+        -- (they already hold the item). For all other positions, including controller
+        -- last, we still need SPEED_GIVE_DELAY so the transfer completes first.
+        local skipWasApplied = (i == 1 and first == controller)
+        local useDelay = skipWasApplied and 0.0 or SPEED_GIVE_DELAY
+        table.insert(steps, {delay=useDelay, fn=function()
             addStatus('[SPD] Telling %s to use.', m)
             requestRemoteUse(m, itemName)
         end})
@@ -802,11 +874,13 @@ local function buildSpeedPipeline(list, controller, itemName)
                 requestItemTransfer(nxt, m, itemName)
             end})
         else
-            -- Last member: pull item back to controller
-            table.insert(steps, {delay=castWait, fn=function()
-                addStatus('[SPD] Pulling back from %s.', m)
-                requestItemTransfer(controller, m, itemName)
-            end})
+            -- Last member: pull item back to controller (skip if controller is last)
+            if m ~= controller then
+                table.insert(steps, {delay=castWait, fn=function()
+                    addStatus('[SPD] Pulling back from %s.', m)
+                    requestItemTransfer(controller, m, itemName)
+                end})
+            end
         end
     end
 
@@ -844,6 +918,19 @@ local function speedTick()
 
     -- Poll for item return after last pull request
     if scm.phase == 'SPEED_WAIT_RETURN' then
+        -- Controller-last: they used the item themselves so no return is coming.
+        -- Wait castTime + buffer for the use to complete, then declare done.
+        if speedControllerIsLast then
+            if now - speedPhaseStart >= (activeItemCastTime + 1.5) then
+                chainTimer.lastTotal = os.time() - chainTimer.startTime
+                addStatus('[SPD] Pipeline complete in %.0fs. (controller clicked last)', chainTimer.lastTotal)
+                resetSCMState()
+                running = false
+                paused  = false
+            end
+            return
+        end
+        -- Normal: poll for the item returning to the controller
         if countItemByName(item) > 0 then
             chainTimer.lastTotal = os.time() - chainTimer.startTime
             addStatus('[SPD] Pipeline complete in %.0fs.', chainTimer.lastTotal)
@@ -873,7 +960,7 @@ local function startChain()
 
     local me = trim(mq.TLO.Me.Name() or '')
     validateChainStart()
-    scm.list = buildSCMList()
+    scm.list = buildSCMList(true)  -- verbose=true: log full member state at chain start
     if #scm.list == 0 then addStatus('ERROR: No enabled members.') return end
 
     scm.index    = 1
@@ -901,11 +988,13 @@ local function startChain()
 
     -- Route to speed pipeline or normal adaptive FSM
     if EXP_speedMode then
-        speedPipeline      = buildSpeedPipeline(scm.list, me, item)
-        speedPipelineIndex = 1
-        speedPhaseStart    = os.clock()
-        scm.phase          = 'SPEED_PIPELINE'
-        addStatus('[SPD] Pipeline built (%d steps). Fire!', #speedPipeline)
+        speedPipeline         = buildSpeedPipeline(scm.list, me, item)
+        speedPipelineIndex    = 1
+        speedPhaseStart       = os.clock()
+        speedControllerIsLast = (scm.list[#scm.list] == me)
+        scm.phase             = 'SPEED_PIPELINE'
+        addStatus('[SPD] Pipeline built (%d steps). Fire! ControllerLast=%s',
+            #speedPipeline, tostring(speedControllerIsLast))
     else
         scm.phase = 'WAIT_HAVE_ITEM'
     end
@@ -946,12 +1035,17 @@ local function scmTick()
 
     if scm.phase == 'WAIT_HAVE_ITEM' then
         if scm.member == me then
-            if countItemByName(item) > 0 then
+            local cnt = countItemByName(item)
+            debugLog('scmTick WAIT_HAVE_ITEM: member==controller (%s) | itemCount=%d', me, cnt)
+            if cnt > 0 then
+                debugLog('scmTick: controller has item -> USE_LOCAL')
                 scm.phase='USE_LOCAL' scm.startTime=now
             end
             return
         end
-        if countItemByName(item) > 0 then
+        local cnt = countItemByName(item)
+        debugLog('scmTick WAIT_HAVE_ITEM: member=%s | itemCount=%d', scm.member, cnt)
+        if cnt > 0 then
             addStatus('Controller has "%s". Sending to %s.', item, scm.member)
             scm.phase='GIVE_TO_MEMBER' scm.attempts=0 scm.startTime=now
             requestItemTransfer(scm.member, me, item)
@@ -960,6 +1054,7 @@ local function scmTick()
     end
 
     if scm.phase == 'USE_LOCAL' then
+        debugLog('scmTick USE_LOCAL: firing useItemLocal for controller | index=%d of %d', scm.index, #scm.list)
         useItemLocal(item)
         if scm.index < #scm.list then
             scm.index=scm.index+1 scm.member=scm.list[scm.index]
@@ -1346,11 +1441,29 @@ local function renderUI()
         local me   = trim(mq.TLO.Me.Name() or '')
         local list = buildSCMList()
         if #list == 0 then
-            ImGui.TextWrapped('Enable at least one other member...')
+            ImGui.TextWrapped('Enable at least one member...')
         else
+            -- Check whether controller is in the rotation list
+            local controllerInList = false
+            for _, nm in ipairs(list) do
+                if nm == me then controllerInList = true break end
+            end
+
             local parts = {me .. ' [controller]'}
-            for _,nm in ipairs(list) do table.insert(parts, nm) end
-            table.insert(parts, me .. ' [end]')
+            for _, nm in ipairs(list) do
+                -- Tag the controller's position in the chain so it's clear
+                -- they will self-click here, not just appear as a cosmetic bookend.
+                if nm == me then
+                    table.insert(parts, nm .. ' [click]')
+                else
+                    table.insert(parts, nm)
+                end
+            end
+            -- Only append [return] if controller is NOT in the list;
+            -- if they are, the chain ends when they click (no extra return step).
+            if not controllerInList then
+                table.insert(parts, me .. ' [return]')
+            end
             ImGui.TextWrapped(table.concat(parts, ' -> '))
         end
 
@@ -1459,6 +1572,37 @@ local function renderUI()
             ImGui.TextDisabled(string.format('Give: %.1fs | Use buffer: +%.1fs | (pipeline, no adaptive wait)',
                 SPEED_GIVE_DELAY, SPEED_USE_DELAY))
             ImGui.TextWrapped('Pre-built pipeline: fires all commands up front with fixed delays. ~2x faster. Use on stable systems only.')
+        end
+
+        ImGui.Separator()
+
+        ----------------------------------------------------
+        -- DEBUG LOGGING
+        ----------------------------------------------------
+        ImGui.Text('Debug Logging')
+        local prevDebug = debugMode
+        debugMode = ImGui.Checkbox('Enable Debug Log##dbg_enable', debugMode)
+        if debugMode and not prevDebug then
+            -- Write a session header when first enabled so the log is clearly segmented
+            local f = io.open(DEBUG_LOG_PATH, 'a')
+            if f then
+                f:write(string.format('\n=== ItemPass debug session started %s ===\n', os.date('%Y-%m-%d %H:%M:%S')))
+                f:close()
+            end
+            addStatus('[DBG] Debug logging ON -> %s', DEBUG_LOG_PATH)
+        elseif not debugMode and prevDebug then
+            addStatus('[DBG] Debug logging OFF.')
+        end
+
+        if debugMode then
+            ImGui.SameLine()
+            if ImGui.Button('Clear Log##dbg_clear') then
+                local f = io.open(DEBUG_LOG_PATH, 'w')
+                if f then f:close() end
+                addStatus('[DBG] Debug log cleared.')
+            end
+            ImGui.TextDisabled(DEBUG_LOG_PATH)
+            ImGui.TextWrapped('Verbose FSM tracing is written to the file above.')
         end
 
         ImGui.Separator()
