@@ -20,6 +20,7 @@ then returns it to the controller. Fully automated and adaptive.
 | Inventory autocomplete with fuzzy matching | Stable |
 | Hidden item list | Stable |
 | ImGui overlay UI | Stable |
+| Debug logging mode | Stable |
 | Auto-locate item via `/fic` | Experimental |
 | Auto-resume chain after locate pull | Experimental |
 | Speed Mode (pre-built pipeline, os.clock precision) | Experimental |
@@ -42,6 +43,14 @@ then returns it to the controller. Fully automated and adaptive.
 | `/itempassstart` | Start chain |
 | `/itempasspause` | Pause / resume |
 | `/itempassreset` | Reset chain |
+
+---
+
+## Debug Logging
+
+Enable the **Debug Log** checkbox in the UI to write all status messages and verbose
+FSM tracing to `itempass_debug.txt` in your MQ root folder. Use the **Clear Log**
+button to start a fresh capture before each test run.
 
 ---
 
@@ -98,7 +107,7 @@ Speed Mode bypasses this entirely with a pre-built command pipeline.
 
 ## Version
 
-Current: **v1.7.1**
+Current: **v1.7.2**
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ---
