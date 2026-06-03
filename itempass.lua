@@ -91,6 +91,22 @@ local ImGui = require('ImGui')
 ---------------------------------------------------------------------
 local SCRIPT_VERSION = "1.7.2" -- semantic version: MAJOR.MINOR.PATCH
 
+-- Update check: fetches version.txt from GitHub on load, notifies if newer version exists
+local function checkForUpdate()
+    local ok, http = pcall(require, 'socket.http')
+    if not ok then return end
+    pcall(function()
+        local body, code = http.request('https://raw.githubusercontent.com/mjdeiter/ItemPass/main/version.txt')
+        if code == 200 and body then
+            local latest = body:match('^%%s*([%%d%%.]+)%%s*$')
+            if latest and latest ~= SCRIPT_VERSION then
+                addStatus(string.format('\\ayUpdate available: v%s (you have v%s)', latest, SCRIPT_VERSION))
+                addStatus('\\ayGet it at: https://github.com/mjdeiter/ItemPass')
+            end
+        end
+    end)
+end
+
 ---------------------------------------------------------------------
 -- CONFIG
 ---------------------------------------------------------------------
@@ -1673,6 +1689,7 @@ local function init()
     mq.imgui.init('itempass_ui', renderUI)
 
     addStatus('Ready. Commands: /itempassui /itempassstart /itempasspause /itempassreset')
+    checkForUpdate()
 end
 
 init()
