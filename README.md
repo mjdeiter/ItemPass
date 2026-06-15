@@ -1,4 +1,7 @@
 # ItemPass v1.7.2
+
+A [MacroQuest](https://www.macroquest.org/) Lua script for the [Project Lazarus](https://www.lazaruseq.com/) EverQuest emulator server.
+
 **MQNext / E3Next**
 *Driver-based item passing script for group buff rotations.*
 
